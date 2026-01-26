@@ -1,12 +1,7 @@
-# app.py (cloud-ready)
-
 import streamlit as st
 from pathlib import Path
 import requests
 import math
-import tempfile
-import zipfile
-import shutil
 
 from engine import build_shortlist_from_djdownload
 
@@ -64,18 +59,18 @@ st.caption("Example-based shortlisting using DJDownload previews")
 st.divider()
 
 # ============================================================
-# UPLOAD EXAMPLES
+# FOLDER INPUT (cloud safe)
 # ============================================================
 
-st.subheader("📁 Upload example tracks")
-
-uploaded_files = st.file_uploader(
-    "Upload MP3/WAV examples",
-    type=["mp3", "wav"],
-    accept_multiple_files=True
+examples_folder = st.text_input(
+    "📁 Examples folder (MP3)",
+    "examples",
 )
 
-st.divider()
+output_folder = st.text_input(
+    "📦 Shortlist output folder",
+    "shortlist",
+)
 
 # ============================================================
 # GENRES
@@ -105,20 +100,6 @@ for i, genre in enumerate(AVAILABLE_GENRES):
 st.divider()
 
 # ============================================================
-# YEARS
-# ============================================================
-
-st.subheader("📅 Years to scan")
-
-col1, col2, col3 = st.columns(3)
-
-scan_2026 = col1.checkbox("2026", value=True)
-scan_2025 = col2.checkbox("2025", value=True)
-scan_2024 = col3.checkbox("2024", value=False)
-
-st.divider()
-
-# ============================================================
 # SIMILARITY
 # ============================================================
 
@@ -131,33 +112,25 @@ threshold = st.slider(
 )
 
 # ============================================================
-# PAGE RANGE AUTO
+# PAGE RANGE SLIDER (BACK!)
 # ============================================================
 
-page_ranges = []
+st.subheader("📄 Page range to scan")
 
-if scan_2026:
-    page_ranges.append((1, 80))
+if last_page:
+    start_page, end_page = st.slider(
+        "Select page range",
+        min_value=1,
+        max_value=last_page,
+        value=(1, min(100, last_page)),
+        step=1,
+    )
 
-if scan_2025:
-    page_ranges.append((100, 1600))
-
-if scan_2024 and last_page:
-    page_ranges.append((2000, last_page))
-
-if page_ranges:
-    start_page = min(r[0] for r in page_ranges)
-    end_page = max(r[1] for r in page_ranges)
-else:
-    start_page = None
-    end_page = None
-
-st.subheader("📄 Auto page range")
-
-if start_page and end_page:
     st.info(f"Scanning pages {start_page} → {end_page}")
+
 else:
-    st.warning("No years selected")
+    st.warning("Unable to fetch DJDownload page count")
+    start_page = end_page = None
 
 st.divider()
 
@@ -167,8 +140,11 @@ st.divider()
 
 if st.button("🚀 Build shortlist", use_container_width=True):
 
-    if not uploaded_files:
-        st.error("Upload at least one example track")
+    ex_path = Path(examples_folder)
+    out_path = Path(output_folder)
+
+    if not ex_path.exists():
+        st.error("Examples folder does not exist")
         st.stop()
 
     if not selected_genres:
@@ -176,27 +152,16 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         st.stop()
 
     if not start_page or not end_page:
-        st.error("Select at least one year")
+        st.error("Invalid page range")
         st.stop()
 
-    # Create temp folders
-    examples_dir = Path(tempfile.mkdtemp())
-    output_dir = Path(tempfile.mkdtemp())
-
-    # Save uploaded examples
-    for file in uploaded_files:
-        dest = examples_dir / file.name
-        with open(dest, "wb") as f:
-            f.write(file.read())
-
     with st.spinner("Analyzing examples and scanning DJDownload…"):
-
         try:
             result = build_shortlist_from_djdownload(
-                examples_folder=examples_dir,
-                output_folder=output_dir,
+                examples_folder=ex_path,
+                output_folder=out_path,
                 genres=selected_genres,
-                selected_years=[],
+                selected_years=[],   # no longer used
                 threshold=threshold,
                 start_page=start_page,
                 end_page=end_page,
@@ -205,8 +170,6 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         except Exception as e:
             st.error("❌ Error during processing")
             st.exception(e)
-            shutil.rmtree(examples_dir, ignore_errors=True)
-            shutil.rmtree(output_dir, ignore_errors=True)
             st.stop()
 
     st.success("✅ Shortlist completed")
@@ -219,24 +182,6 @@ if st.button("🚀 Build shortlist", use_container_width=True):
     else:
         st.info("No tracks matched the current threshold.")
 
-    # ============================================================
-    # ZIP OUTPUT
-    # ============================================================
-
-    zip_path = output_dir.parent / "shortlist.zip"
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for file in output_dir.rglob("*"):
-            if file.is_file():
-                zipf.write(file, arcname=file.relative_to(output_dir))
-
-    with open(zip_path, "rb") as f:
-        st.download_button(
-            "📥 Download shortlist (ZIP)",
-            data=f,
-            file_name="dj_ai_shortlist.zip",
-            mime="application/zip"
-        )
 
 
 
