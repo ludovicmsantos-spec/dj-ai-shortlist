@@ -1,7 +1,12 @@
+# app.py (cloud-ready)
+
 import streamlit as st
 from pathlib import Path
 import requests
 import math
+import tempfile
+import zipfile
+import shutil
 
 from engine import build_shortlist_from_djdownload
 
@@ -42,54 +47,6 @@ def get_last_page():
 
 
 # ============================================================
-# FAST YEAR BOUNDARY DETECTOR (CACHED)
-# ============================================================
-
-@st.cache_data
-def detect_year_boundaries(last_page):
-
-    token = Path("token.txt").read_text().strip()
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    # smart jumps (super fast)
-    probe_pages = [
-        1, 50, 100, 200, 400, 800,
-        1200, 1600, 2000, 2500, last_page
-    ]
-
-    year_map = {}
-
-    for page in probe_pages:
-
-        r = requests.get(
-            f"https://api.djdownload.me/tracks?page={page}",
-            headers=headers,
-            timeout=15
-        )
-
-        tracks = r.json().get("tracks", [])
-
-        if not tracks:
-            continue
-
-        release = tracks[0].get("release") or tracks[0].get("release_date")
-
-        if not release:
-            continue
-
-        year = release.split("-")[0]
-
-        if year not in year_map:
-            year_map[year] = page
-
-    return year_map
-
-
-# ============================================================
 # HEADER
 # ============================================================
 
@@ -107,18 +64,18 @@ st.caption("Example-based shortlisting using DJDownload previews")
 st.divider()
 
 # ============================================================
-# INPUT PATHS
+# UPLOAD EXAMPLES
 # ============================================================
 
-examples_folder = st.text_input(
-    "📁 Examples folder (MP3)",
-    "/Users/ludo_cisco/Desktop/examples_song",
+st.subheader("📁 Upload example tracks")
+
+uploaded_files = st.file_uploader(
+    "Upload MP3/WAV examples",
+    type=["mp3", "wav"],
+    accept_multiple_files=True
 )
 
-output_folder = st.text_input(
-    "📦 Shortlist output folder",
-    "/Users/ludo_cisco/Desktop/shortlist",
-)
+st.divider()
 
 # ============================================================
 # GENRES
@@ -151,20 +108,13 @@ st.divider()
 # YEARS
 # ============================================================
 
-st.subheader("📅 Release years")
+st.subheader("📅 Years to scan")
 
-AVAILABLE_YEARS = ["2026", "2025", "2024", "Older"]
+col1, col2, col3 = st.columns(3)
 
-selected_years = []
-cols = st.columns(4)
-
-for i, year in enumerate(AVAILABLE_YEARS):
-    if cols[i].checkbox(year, value=(year in ["2026", "2025"])):
-        selected_years.append(year)
-
-st.caption(
-    f"Selected years: {', '.join(selected_years) if selected_years else 'None'}"
-)
+scan_2026 = col1.checkbox("2026", value=True)
+scan_2025 = col2.checkbox("2025", value=True)
+scan_2024 = col3.checkbox("2024", value=False)
 
 st.divider()
 
@@ -180,56 +130,34 @@ threshold = st.slider(
     step=0.05,
 )
 
-st.divider()
-
 # ============================================================
-# AUTO PAGE RANGE FROM REAL DATA
+# PAGE RANGE AUTO
 # ============================================================
 
-st.subheader("📄 Page range to scan")
+page_ranges = []
 
-if last_page:
-    year_boundaries = detect_year_boundaries(last_page)
+if scan_2026:
+    page_ranges.append((1, 80))
+
+if scan_2025:
+    page_ranges.append((100, 1600))
+
+if scan_2024 and last_page:
+    page_ranges.append((2000, last_page))
+
+if page_ranges:
+    start_page = min(r[0] for r in page_ranges)
+    end_page = max(r[1] for r in page_ranges)
 else:
-    year_boundaries = {}
+    start_page = None
+    end_page = None
 
-auto_start = None
-auto_end = None
+st.subheader("📄 Auto page range")
 
-for year in selected_years:
-
-    if year == "Older":
-        # everything older than the oldest detected year
-        if year_boundaries:
-            oldest_page = max(year_boundaries.values())
-            auto_start = oldest_page if auto_start is None else min(auto_start, oldest_page)
-            auto_end = last_page if auto_end is None else max(auto_end, last_page)
-
-    elif year in year_boundaries:
-        p = year_boundaries[year]
-
-        auto_start = p if auto_start is None else min(auto_start, p)
-        auto_end = p if auto_end is None else max(auto_end, p)
-
-# fallback if nothing selected
-if auto_start is None:
-    auto_start = 1
-
-if auto_end is None:
-    auto_end = last_page if last_page else 1
-
-# ============================================================
-# SLIDER (AUTO-SET BUT MANUAL TUNABLE)
-# ============================================================
-
-start_page, end_page = st.slider(
-    "Select page range",
-    min_value=1,
-    max_value=last_page if last_page else 1,
-    value=(int(auto_start), int(auto_end)),
-)
-
-st.caption(f"Scanning pages {start_page} → {end_page}")
+if start_page and end_page:
+    st.info(f"Scanning pages {start_page} → {end_page}")
+else:
+    st.warning("No years selected")
 
 st.divider()
 
@@ -239,32 +167,36 @@ st.divider()
 
 if st.button("🚀 Build shortlist", use_container_width=True):
 
-    ex_path = Path(examples_folder)
-    out_path = Path(output_folder)
-
-    if not ex_path.exists():
-        st.error("Examples folder does not exist")
+    if not uploaded_files:
+        st.error("Upload at least one example track")
         st.stop()
 
     if not selected_genres:
         st.error("Select at least one genre")
         st.stop()
 
-    if not selected_years:
+    if not start_page or not end_page:
         st.error("Select at least one year")
         st.stop()
 
-    if end_page < start_page:
-        st.error("End page must be >= start page")
-        st.stop()
+    # Create temp folders
+    examples_dir = Path(tempfile.mkdtemp())
+    output_dir = Path(tempfile.mkdtemp())
+
+    # Save uploaded examples
+    for file in uploaded_files:
+        dest = examples_dir / file.name
+        with open(dest, "wb") as f:
+            f.write(file.read())
 
     with st.spinner("Analyzing examples and scanning DJDownload…"):
+
         try:
             result = build_shortlist_from_djdownload(
-                examples_folder=ex_path,
-                output_folder=out_path,
+                examples_folder=examples_dir,
+                output_folder=output_dir,
                 genres=selected_genres,
-                selected_years=selected_years,
+                selected_years=[],
                 threshold=threshold,
                 start_page=start_page,
                 end_page=end_page,
@@ -273,6 +205,8 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         except Exception as e:
             st.error("❌ Error during processing")
             st.exception(e)
+            shutil.rmtree(examples_dir, ignore_errors=True)
+            shutil.rmtree(output_dir, ignore_errors=True)
             st.stop()
 
     st.success("✅ Shortlist completed")
@@ -284,4 +218,25 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         st.json(result["tracks"])
     else:
         st.info("No tracks matched the current threshold.")
+
+    # ============================================================
+    # ZIP OUTPUT
+    # ============================================================
+
+    zip_path = output_dir.parent / "shortlist.zip"
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for file in output_dir.rglob("*"):
+            if file.is_file():
+                zipf.write(file, arcname=file.relative_to(output_dir))
+
+    with open(zip_path, "rb") as f:
+        st.download_button(
+            "📥 Download shortlist (ZIP)",
+            data=f,
+            file_name="dj_ai_shortlist.zip",
+            mime="application/zip"
+        )
+
+
 
