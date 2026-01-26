@@ -18,6 +18,13 @@ st.set_page_config(
 )
 
 # ============================================================
+# SESSION STATE
+# ============================================================
+
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+
+# ============================================================
 # FETCH LAST PAGE
 # ============================================================
 
@@ -43,9 +50,8 @@ def get_last_page():
     except Exception:
         return None
 
-
 # ============================================================
-# FAST YEAR BOUNDARY DETECTOR (CACHED)
+# FAST YEAR BOUNDARY DETECTOR
 # ============================================================
 
 @st.cache_data
@@ -90,7 +96,6 @@ def detect_year_boundaries(last_page):
 
     return year_map
 
-
 # ============================================================
 # HEADER
 # ============================================================
@@ -109,7 +114,7 @@ st.caption("Example-based shortlisting using DJDownload previews")
 st.divider()
 
 # ============================================================
-# UPLOAD EXAMPLES (CLOUD SAFE)
+# UPLOAD EXAMPLES
 # ============================================================
 
 st.subheader("📁 Upload example MP3 tracks")
@@ -150,7 +155,7 @@ for i, genre in enumerate(AVAILABLE_GENRES):
 st.divider()
 
 # ============================================================
-# YEARS (ORIGINAL STYLE)
+# YEARS
 # ============================================================
 
 st.subheader("📅 Release years")
@@ -185,7 +190,7 @@ threshold = st.slider(
 st.divider()
 
 # ============================================================
-# AUTO PAGE RANGE (FROM REAL DATA)
+# AUTO PAGE RANGE
 # ============================================================
 
 st.subheader("📄 Page range to scan")
@@ -208,11 +213,9 @@ for year in selected_years:
 
     elif year in year_boundaries:
         p = year_boundaries[year]
-
         auto_start = p if auto_start is None else min(auto_start, p)
         auto_end = p if auto_end is None else max(auto_end, p)
 
-# fallback
 if auto_start is None:
     auto_start = 1
 
@@ -220,7 +223,7 @@ if auto_end is None:
     auto_end = last_page if last_page else 1
 
 # ============================================================
-# SLIDER (AUTO SET + MANUAL)
+# SLIDER
 # ============================================================
 
 start_page, end_page = st.slider(
@@ -236,10 +239,34 @@ st.caption(f"Scanning pages {start_page} → {end_page}")
 st.divider()
 
 # ============================================================
+# STOP BUTTON
+# ============================================================
+
+if st.button("🛑 Stop scanning"):
+    st.session_state.stop_requested = True
+
+# ============================================================
+# PROGRESS UI
+# ============================================================
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+kept_text = st.empty()
+
+def progress_callback(current_page, total_pages, kept_count):
+    progress = current_page / total_pages
+    progress_bar.progress(progress)
+
+    status_text.info(f"📄 Page {current_page} / {total_pages}")
+    kept_text.success(f"🎧 Tracks kept: {kept_count}")
+
+# ============================================================
 # RUN
 # ============================================================
 
 if st.button("🚀 Build shortlist", use_container_width=True):
+
+    st.session_state.stop_requested = False
 
     if not uploaded_files:
         st.error("Upload at least one MP3 example")
@@ -257,7 +284,6 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         st.error("End page must be >= start page")
         st.stop()
 
-    # temp folders for cloud
     temp_examples = Path(tempfile.mkdtemp())
     temp_output = Path(tempfile.mkdtemp())
 
@@ -266,6 +292,7 @@ if st.button("🚀 Build shortlist", use_container_width=True):
             out.write(f.read())
 
     with st.spinner("Analyzing examples and scanning DJDownload…"):
+
         try:
             result = build_shortlist_from_djdownload(
                 examples_folder=temp_examples,
@@ -275,6 +302,8 @@ if st.button("🚀 Build shortlist", use_container_width=True):
                 threshold=threshold,
                 start_page=start_page,
                 end_page=end_page,
+                progress_callback=progress_callback,
+                stop_flag=lambda: st.session_state.stop_requested
             )
 
         except Exception as e:
@@ -307,6 +336,7 @@ if st.button("🚀 Build shortlist", use_container_width=True):
 
     shutil.rmtree(temp_examples, ignore_errors=True)
     shutil.rmtree(temp_output, ignore_errors=True)
+
 
 
 
