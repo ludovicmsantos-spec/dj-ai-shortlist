@@ -1,8 +1,8 @@
-# engine.py
 import shutil
 import tempfile
 from pathlib import Path
 import requests
+import time
 
 import librosa
 import numpy as np
@@ -23,6 +23,8 @@ HEADERS_BASE = {
     "Referer": "https://djdownload.me/",
 }
 
+MAX_STREAM_RETRIES = 3
+
 # ============================================================
 # AUTH
 # ============================================================
@@ -41,7 +43,7 @@ def api_headers():
     }
 
 # ============================================================
-# ARTIST EXTRACTION (WORKING + CLEAN)
+# ARTIST EXTRACTION
 # ============================================================
 
 def extract_artist_from_track(track: dict) -> str:
@@ -55,31 +57,26 @@ def extract_artist_from_track(track: dict) -> str:
     return ""
 
 # ============================================================
-# AUDIO ANALYSIS (SMART)
+# AUDIO ANALYSIS
 # ============================================================
 
 def analyze_track(audio_path: Path) -> dict | None:
     try:
         y, sr = librosa.load(audio_path, mono=True, duration=90)
 
-        # BPM
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
 
-        # Rhythm strength
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         rhythm = float(np.mean(onset_env))
 
-        # Key
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
         key_idx = int(np.argmax(chroma.mean(axis=1)))
 
         KEYS = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
 
-        # Brightness
         centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
         brightness = float(np.mean(centroid))
 
-        # Bass energy (20–150Hz)
         stft = np.abs(librosa.stft(y))
         freqs = librosa.fft_frequencies(sr=sr)
 
@@ -95,7 +92,7 @@ def analyze_track(audio_path: Path) -> dict | None:
         }
 
     except Exception as e:
-        print(f"[WARN] Track skipped: {audio_path.name} → {e}")
+        print(f"[WARN] Analysis failed: {audio_path.name} → {e}")
         return None
 
 # ============================================================
@@ -137,27 +134,44 @@ def fetch_tracks(page: int) -> list[dict]:
     return r.json().get("tracks", [])
 
 # ============================================================
-# STREAM MP3 PREVIEW
+# STREAM MP3 (SAFE + RETRIES)
 # ============================================================
 
-def stream_track(stream_url: str) -> Path:
-    tmp = tempfile.NamedTemporaryFile(
-        suffix=".mp3",
-        delete=False,
-        dir=CACHE_ROOT
-    )
+def stream_track(stream_url: str) -> Path | None:
 
-    with requests.get(stream_url, headers=api_headers(), stream=True) as r:
-        r.raise_for_status()
-        for chunk in r.iter_content(chunk_size=8192):
-            if chunk:
-                tmp.write(chunk)
+    for attempt in range(1, MAX_STREAM_RETRIES + 1):
 
-    tmp.close()
-    return Path(tmp.name)
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                suffix=".mp3",
+                delete=False,
+                dir=CACHE_ROOT
+            )
+
+            with requests.get(
+                stream_url,
+                headers=api_headers(),
+                stream=True,
+                timeout=60
+            ) as r:
+
+                r.raise_for_status()
+
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        tmp.write(chunk)
+
+            tmp.close()
+            return Path(tmp.name)
+
+        except Exception as e:
+            print(f"[WARN] Stream failed (try {attempt}/{MAX_STREAM_RETRIES}): {e}")
+            time.sleep(1)
+
+    return None
 
 # ============================================================
-# GENRE WEIGHTS (BALANCED)
+# GENRE WEIGHTS
 # ============================================================
 
 GENRE_WEIGHTS = {
@@ -178,7 +192,7 @@ DEFAULT_WEIGHTS = dict(
 )
 
 # ============================================================
-# SIMILARITY (GENRE AWARE)
+# SIMILARITY
 # ============================================================
 
 def similarity_score(example: dict, candidate: dict, genre: str) -> float:
@@ -203,7 +217,7 @@ def similarity_score(example: dict, candidate: dict, genre: str) -> float:
     )
 
 # ============================================================
-# MAIN CONTROLLER
+# MAIN CONTROLLER (WITH STOP + PROGRESS)
 # ============================================================
 
 def build_shortlist_from_djdownload(
@@ -214,41 +228,55 @@ def build_shortlist_from_djdownload(
     threshold: float,
     start_page: int,
     end_page: int,
+    progress_callback=None,
+    stop_flag=None,
 ):
 
     example_profile = analyze_examples_folder(examples_folder)
-    print(f"✅ Example profile built from {example_profile['count']} tracks")
 
     kept = []
+    total_pages = end_page - start_page + 1
 
-    for page in range(start_page, end_page + 1):
-        print(f"📄 Scanning page {page}")
+    for idx, page in enumerate(range(start_page, end_page + 1), start=1):
+
+        if stop_flag and stop_flag():
+            print("🛑 Stopped by user")
+            break
+
+        if progress_callback:
+            progress_callback(
+                current_page=page,
+                total_pages=total_pages,
+                kept_count=len(kept)
+            )
 
         tracks = fetch_tracks(page)
 
         for track in tracks:
+
+            if stop_flag and stop_flag():
+                break
 
             genre = track.get("genre")
 
             if genres and genre not in genres:
                 continue
 
-            # ================= YEAR FILTER =================
-
             release_date = track.get("release_date")
 
             if release_date:
                 year = release_date.split("-")[0]
-
                 if "Older" not in selected_years and year not in selected_years:
                     continue
-
-            # =================================================
 
             if "url" not in track or "title" not in track:
                 continue
 
             audio_path = stream_track(track["url"])
+
+            if not audio_path:
+                continue
+
             features = analyze_track(audio_path)
 
             if not features:
@@ -277,8 +305,6 @@ def build_shortlist_from_djdownload(
                     "score": round(score, 3),
                 })
 
-                print(f"✅ MATCH: {artist} - {title} ({score:.2f})")
-
             else:
                 audio_path.unlink(missing_ok=True)
 
@@ -286,4 +312,5 @@ def build_shortlist_from_djdownload(
         "kept": len(kept),
         "tracks": kept,
     }
+
 
