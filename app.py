@@ -5,7 +5,6 @@ import math
 import tempfile
 import zipfile
 import shutil
-from datetime import datetime
 
 from engine import build_shortlist_from_djdownload
 
@@ -46,6 +45,53 @@ def get_last_page():
 
 
 # ============================================================
+# FAST YEAR BOUNDARY DETECTOR (CACHED)
+# ============================================================
+
+@st.cache_data
+def detect_year_boundaries(last_page):
+
+    token = Path("token.txt").read_text().strip()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    probe_pages = [
+        1, 50, 100, 200, 400, 800,
+        1200, 1600, 2000, 2500, last_page
+    ]
+
+    year_map = {}
+
+    for page in probe_pages:
+
+        r = requests.get(
+            f"https://api.djdownload.me/tracks?page={page}",
+            headers=headers,
+            timeout=15
+        )
+
+        tracks = r.json().get("tracks", [])
+
+        if not tracks:
+            continue
+
+        release = tracks[0].get("release") or tracks[0].get("release_date")
+
+        if not release:
+            continue
+
+        year = release.split("-")[0]
+
+        if year not in year_map:
+            year_map[year] = page
+
+    return year_map
+
+
+# ============================================================
 # HEADER
 # ============================================================
 
@@ -63,10 +109,10 @@ st.caption("Example-based shortlisting using DJDownload previews")
 st.divider()
 
 # ============================================================
-# FILE UPLOAD
+# UPLOAD EXAMPLES (CLOUD SAFE)
 # ============================================================
 
-st.subheader("📁 Upload example tracks (MP3)")
+st.subheader("📁 Upload example MP3 tracks")
 
 uploaded_files = st.file_uploader(
     "Upload MP3 examples",
@@ -104,25 +150,23 @@ for i, genre in enumerate(AVAILABLE_GENRES):
 st.divider()
 
 # ============================================================
-# YEARS
+# YEARS (ORIGINAL STYLE)
 # ============================================================
 
-st.subheader("📅 Years to include")
+st.subheader("📅 Release years")
 
-col1, col2, col3 = st.columns(3)
-
-scan_2026 = col1.checkbox("2026", value=True)
-scan_2025 = col2.checkbox("2025", value=True)
-scan_2024 = col3.checkbox("2024", value=False)
+AVAILABLE_YEARS = ["2026", "2025", "2024", "Older"]
 
 selected_years = []
+cols = st.columns(4)
 
-if scan_2026:
-    selected_years.append(2026)
-if scan_2025:
-    selected_years.append(2025)
-if scan_2024:
-    selected_years.append(2024)
+for i, year in enumerate(AVAILABLE_YEARS):
+    if cols[i].checkbox(year, value=(year in ["2026", "2025"])):
+        selected_years.append(year)
+
+st.caption(
+    f"Selected years: {', '.join(selected_years) if selected_years else 'None'}"
+)
 
 st.divider()
 
@@ -138,25 +182,56 @@ threshold = st.slider(
     0.05
 )
 
+st.divider()
+
 # ============================================================
-# PAGE RANGE
+# AUTO PAGE RANGE (FROM REAL DATA)
 # ============================================================
 
 st.subheader("📄 Page range to scan")
 
 if last_page:
-    start_page, end_page = st.slider(
-        "Select page range",
-        1,
-        last_page,
-        (1, min(100, last_page)),
-        step=1
-    )
-
-    st.info(f"Scanning pages {start_page} → {end_page}")
+    year_boundaries = detect_year_boundaries(last_page)
 else:
-    start_page = end_page = None
-    st.warning("Page count unavailable")
+    year_boundaries = {}
+
+auto_start = None
+auto_end = None
+
+for year in selected_years:
+
+    if year == "Older":
+        if year_boundaries:
+            oldest_page = max(year_boundaries.values())
+            auto_start = oldest_page if auto_start is None else min(auto_start, oldest_page)
+            auto_end = last_page if auto_end is None else max(auto_end, last_page)
+
+    elif year in year_boundaries:
+        p = year_boundaries[year]
+
+        auto_start = p if auto_start is None else min(auto_start, p)
+        auto_end = p if auto_end is None else max(auto_end, p)
+
+# fallback
+if auto_start is None:
+    auto_start = 1
+
+if auto_end is None:
+    auto_end = last_page if last_page else 1
+
+# ============================================================
+# SLIDER (AUTO SET + MANUAL)
+# ============================================================
+
+start_page, end_page = st.slider(
+    "Select page range",
+    1,
+    last_page if last_page else 1,
+    (int(auto_start), int(auto_end)),
+    step=1
+)
+
+st.caption(f"Scanning pages {start_page} → {end_page}")
 
 st.divider()
 
@@ -178,10 +253,11 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         st.error("Select at least one year")
         st.stop()
 
-    if not start_page or not end_page:
-        st.error("Invalid page range")
+    if end_page < start_page:
+        st.error("End page must be >= start page")
         st.stop()
 
+    # temp folders for cloud
     temp_examples = Path(tempfile.mkdtemp())
     temp_output = Path(tempfile.mkdtemp())
 
@@ -189,7 +265,7 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         with open(temp_examples / f.name, "wb") as out:
             out.write(f.read())
 
-    with st.spinner("Scanning DJDownload…"):
+    with st.spinner("Analyzing examples and scanning DJDownload…"):
         try:
             result = build_shortlist_from_djdownload(
                 examples_folder=temp_examples,
@@ -200,15 +276,19 @@ if st.button("🚀 Build shortlist", use_container_width=True):
                 start_page=start_page,
                 end_page=end_page,
             )
+
         except Exception as e:
-            st.error("Processing error")
+            st.error("❌ Error during processing")
             st.exception(e)
             st.stop()
 
     st.success("✅ Shortlist completed")
     st.write(f"Tracks kept: **{result['kept']}**")
 
-    # ZIP OUTPUT
+    # ============================================================
+    # ZIP DOWNLOAD
+    # ============================================================
+
     zip_path = Path(tempfile.gettempdir()) / "shortlist.zip"
 
     with zipfile.ZipFile(zip_path, "w") as zipf:
@@ -227,6 +307,7 @@ if st.button("🚀 Build shortlist", use_container_width=True):
 
     shutil.rmtree(temp_examples, ignore_errors=True)
     shutil.rmtree(temp_output, ignore_errors=True)
+
 
 
 
