@@ -2,6 +2,9 @@ import streamlit as st
 from pathlib import Path
 import requests
 import math
+import tempfile
+import zipfile
+import shutil
 
 from engine import build_shortlist_from_djdownload
 
@@ -59,18 +62,18 @@ st.caption("Example-based shortlisting using DJDownload previews")
 st.divider()
 
 # ============================================================
-# FOLDER INPUT (cloud safe)
+# FILE UPLOAD (EXAMPLES)
 # ============================================================
 
-examples_folder = st.text_input(
-    "📁 Examples folder (MP3)",
-    "examples",
+st.subheader("📁 Upload example tracks (MP3)")
+
+uploaded_files = st.file_uploader(
+    "Upload one or more MP3 files",
+    type=["mp3"],
+    accept_multiple_files=True
 )
 
-output_folder = st.text_input(
-    "📦 Shortlist output folder",
-    "shortlist",
-)
+st.divider()
 
 # ============================================================
 # GENRES
@@ -105,14 +108,14 @@ st.divider()
 
 threshold = st.slider(
     "🎯 Similarity threshold",
-    min_value=0.20,
-    max_value=0.90,
-    value=0.70,
-    step=0.05,
+    0.20,
+    0.90,
+    0.70,
+    0.05
 )
 
 # ============================================================
-# PAGE RANGE SLIDER (BACK!)
+# PAGE RANGE SLIDER
 # ============================================================
 
 st.subheader("📄 Page range to scan")
@@ -120,16 +123,15 @@ st.subheader("📄 Page range to scan")
 if last_page:
     start_page, end_page = st.slider(
         "Select page range",
-        min_value=1,
-        max_value=last_page,
-        value=(1, min(100, last_page)),
-        step=1,
+        1,
+        last_page,
+        (1, min(100, last_page)),
+        step=1
     )
 
     st.info(f"Scanning pages {start_page} → {end_page}")
-
 else:
-    st.warning("Unable to fetch DJDownload page count")
+    st.warning("Could not fetch page count")
     start_page = end_page = None
 
 st.divider()
@@ -140,11 +142,8 @@ st.divider()
 
 if st.button("🚀 Build shortlist", use_container_width=True):
 
-    ex_path = Path(examples_folder)
-    out_path = Path(output_folder)
-
-    if not ex_path.exists():
-        st.error("Examples folder does not exist")
+    if not uploaded_files:
+        st.error("Upload at least one MP3 example")
         st.stop()
 
     if not selected_genres:
@@ -155,32 +154,61 @@ if st.button("🚀 Build shortlist", use_container_width=True):
         st.error("Invalid page range")
         st.stop()
 
+    # Create temp folders
+    temp_examples = Path(tempfile.mkdtemp())
+    temp_output = Path(tempfile.mkdtemp())
+
+    # Save uploaded MP3s
+    for f in uploaded_files:
+        with open(temp_examples / f.name, "wb") as out:
+            out.write(f.read())
+
     with st.spinner("Analyzing examples and scanning DJDownload…"):
         try:
             result = build_shortlist_from_djdownload(
-                examples_folder=ex_path,
-                output_folder=out_path,
+                examples_folder=temp_examples,
+                output_folder=temp_output,
                 genres=selected_genres,
-                selected_years=[],   # no longer used
+                selected_years=[],
                 threshold=threshold,
                 start_page=start_page,
                 end_page=end_page,
             )
-
         except Exception as e:
             st.error("❌ Error during processing")
             st.exception(e)
+            shutil.rmtree(temp_examples, ignore_errors=True)
+            shutil.rmtree(temp_output, ignore_errors=True)
             st.stop()
 
     st.success("✅ Shortlist completed")
 
-    st.subheader("🎯 Result")
     st.write(f"Tracks kept: **{result['kept']}**")
 
-    if result["tracks"]:
-        st.json(result["tracks"])
-    else:
-        st.info("No tracks matched the current threshold.")
+    # ========================================================
+    # ZIP OUTPUT
+    # ========================================================
+
+    zip_path = Path(tempfile.gettempdir()) / "shortlist.zip"
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for file in temp_output.rglob("*"):
+            if file.is_file():
+                zipf.write(file, arcname=file.name)
+
+    with open(zip_path, "rb") as f:
+        st.download_button(
+            label="📥 Download shortlist (ZIP)",
+            data=f,
+            file_name="shortlist.zip",
+            mime="application/zip",
+            use_container_width=True
+        )
+
+    # Cleanup
+    shutil.rmtree(temp_examples, ignore_errors=True)
+    shutil.rmtree(temp_output, ignore_errors=True)
+
 
 
 
